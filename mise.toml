@@ -1,0 +1,14 @@
+[tools]
+rust = "stable"
+
+[tasks.check]
+description = "Type-check the crate"
+run = "cargo check"
+
+[tasks.lint]
+description = "Lint the crate"
+run = "cargo clippy --all-targets"
+
+[tasks.verify]
+description = "Everything a change has to pass"
+depends = ["check", "lint"]

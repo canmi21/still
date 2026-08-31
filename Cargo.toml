@@ -1,0 +1,33 @@
+# Cargo walks up the filesystem and would otherwise treat this crate as a member of the
+# workspace this directory sits in. An empty table stops that walk.
+[workspace]
+
+[package]
+name = "still"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Still your Mac. Clean it safely."
+repository = "https://github.com/canmi21/still"
+
+[[bin]]
+name = "still"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "0.2"
+
+# Formatting is rustfmt's and the linter must not report it; see rustfmt.toml.
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"
+complexity = "warn"
+
+# Own code at 0 so an edit-build cycle stays short, dependencies at 3 and then cached. That
+# split matters more here than in most projects: nearly all the work in a run happens inside
+# gpui and its graphics stack, and an unoptimised UI framework is a visibly slower one.
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 3
