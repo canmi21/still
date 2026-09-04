@@ -1,3 +1,8 @@
+# The rebuild loop needs a file watcher, and it is the only project here that does. Pinned to
+# a major like everything in the workspace list one directory up.
+[tools]
+watchexec = "2"
+
 [tasks.check]
 description = "Type-check the crate"
 run = "cargo check"
@@ -9,3 +14,12 @@ run = "cargo clippy --all-targets"
 [tasks.verify]
 description = "Everything a change has to pass"
 depends = ["check", "lint"]
+
+# Two loops, and only the outer one is here. Appearance lives in screen.style, which the
+# running screen re-reads by itself, so this deliberately does not watch it -- a saved colour
+# should reach the window without the window closing. Source changes cannot work that way, and
+# get the blunt version: kill, rebuild, reopen. The window remembers its own frame, so it
+# reopens where it was rather than back in the middle of the display.
+[tasks.screen]
+description = "Open the black screen, rebuilding and reopening it as the source changes"
+run = "watchexec --restart --watch src --watch Cargo.toml --exts rs,toml -- cargo run --release -- screen"

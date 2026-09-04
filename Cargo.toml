@@ -16,6 +16,33 @@ path = "src/main.rs"
 
 [dependencies]
 core-foundation = "0.10"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "objc2-core-foundation",
+  "NSApplication",
+  "NSCell",
+  "NSColor",
+  "NSControl",
+  "NSFont",
+  "NSGraphics",
+  "NSResponder",
+  "NSRunningApplication",
+  "NSScreen",
+  "NSText",
+  "NSTextField",
+  "NSView",
+  "NSWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "block2",
+  "NSDate",
+  "NSGeometry",
+  "NSString",
+  "NSTimer",
+] }
 
 # Formatting is rustfmt's and the linter must not report it; see rustfmt.toml.
 [lints.clippy]

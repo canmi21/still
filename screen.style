@@ -1,0 +1,13 @@
+# The black screen's appearance. Re-read while it is open, so a save shows up in the window
+# within a fifth of a second -- the point is to settle these by looking, on the display they
+# will be used on, rather than by rebuilding.
+
+# 0 is black, 1 is white. Only ever 0 in use; adjustable because comparing black against a
+# near-black is how you find out that it is the right black.
+background = 0.0
+
+# The hint pulls in two directions: readable in a dark room, and dark enough not to light the
+# very area being inspected for dust.
+hint = "hold escape for three seconds to stop"
+hint-white = 0.30
+hint-size = 15.0
