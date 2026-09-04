@@ -20,6 +20,11 @@ depends = ["check", "lint"]
 # should reach the window without the window closing. Source changes cannot work that way, and
 # get the blunt version: kill, rebuild, reopen. The window remembers its own frame, so it
 # reopens where it was rather than back in the middle of the display.
+#
+# The extension filter is what narrows this to source, rather than --watch: watchexec 2.7
+# rejects every relative path given to --watch, so naming src/ there fails outright and the
+# working directory it defaults to is the honest way to say it. screen.style is excluded by
+# having neither extension, which is the behaviour wanted anyway.
 [tasks.screen]
 description = "Open the black screen, rebuilding and reopening it as the source changes"
-run = "watchexec --restart --watch src --watch Cargo.toml --exts rs,toml -- cargo run --release -- screen"
+run = "watchexec --restart --exts rs,toml --ignore 'target/**' -- cargo run --release -- screen"
