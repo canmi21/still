@@ -8,9 +8,11 @@
 mod deadline;
 mod escape;
 mod intercept;
+mod keys;
 mod permission;
 mod screen;
 mod style;
+mod target;
 
 use deadline::Deadline;
 use screen::Mode;

@@ -25,6 +25,13 @@ depends = ["check", "lint"]
 # rejects every relative path given to --watch, so naming src/ there fails outright and the
 # working directory it defaults to is the honest way to say it. screen.style is excluded by
 # having neither extension, which is the behaviour wanted anyway.
+#
+# --project-origin is the price of this repository sitting inside the workspace. watchexec
+# walks up looking for ignore files and finds the workspace's, which ignores repos/*/ -- so
+# every file here reads as ignored and nothing ever changes. Stating the origin stops the
+# walk here, which keeps this project's own .gitignore doing its job: without it, turning the
+# ignore files off wholesale is the only way to see a change, and then target/ is watched too
+# and the file watcher buckles under it.
 [tasks.screen]
 description = "Open the black screen, rebuilding and reopening it as the source changes"
-run = "watchexec --restart --exts rs,toml --ignore 'target/**' -- cargo run --release -- screen"
+run = "watchexec --restart --project-origin . --exts rs,toml -- cargo run --release -- screen"

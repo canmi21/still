@@ -11,3 +11,9 @@ background = 0.0
 hint = "hold escape for three seconds to stop"
 hint-white = 0.30
 hint-size = 15.0
+
+# The keystroke display in the corner. Window mode only: it shows the keys the tap would have
+# taken, without taking any of them. `keys-linger` is how many seconds a key stays up.
+keys-white = 0.45
+keys-size = 13.0
+keys-linger = 2.0

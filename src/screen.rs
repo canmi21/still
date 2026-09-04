@@ -9,21 +9,26 @@
 //! Which is why the mode exists. The two differ in how the window is configured and not at
 //! all in what it contains, so what is settled here in a window carries over unchanged.
 
+use crate::keys::Keystrokes;
 use crate::style::{Style, Watched};
+use crate::target;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
 	NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
-	NSColor, NSFont, NSTextAlignment, NSTextField, NSWindow, NSWindowStyleMask,
+	NSColor, NSEvent, NSEventMask, NSFont, NSTextAlignment, NSTextField, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
 use std::path::Path;
 use std::ptr::NonNull;
+use std::rc::Rc;
+use std::time::Duration;
 
-/// Roughly a laptop display's proportions, so the centre stays where it will be later.
-const WINDOWED_SIZE: NSSize = NSSize::new(1280.0, 800.0);
+/// Roughly a laptop display's proportions, so the centre stays where it will be later. Small
+/// enough to sit beside an editor, since sitting beside an editor is what it is for.
+const WINDOWED_SIZE: NSSize = NSSize::new(720.0, 450.0);
 
 /// Tall enough for the largest hint anybody would set, and fixed, because a height that
 /// changed with the font would move the line off centre every time the font did.
@@ -33,9 +38,16 @@ const HINT_HEIGHT: f64 = 48.0;
 /// file and looking up feels like one action.
 const RELOAD_INTERVAL: f64 = 0.2;
 
+/// The keystroke display's corner: how far it sits from the two edges it is pinned to, and
+/// how tall its line is.
+const KEYS_INSET: f64 = 20.0;
+const KEYS_HEIGHT: f64 = 24.0;
+
 /// Where the window remembers its position and size, so that a rebuild puts it back where it
-/// was rather than in the middle of the screen again.
-const FRAME_MEMORY: &str = "still.screen";
+/// was rather than in the middle of the screen again. The name is versioned because a
+/// remembered frame outranks the default one: changing WINDOWED_SIZE has no visible effect
+/// until the key it would be written under is a key nothing has been written to yet.
+const FRAME_MEMORY: &str = "still.screen.720";
 
 #[derive(Clone, Copy)]
 pub enum Mode {
@@ -56,46 +68,97 @@ pub fn run(mode: Mode, style_path: &Path) {
 	let window = open(mtm, mode);
 	let content = window.contentView().expect("a freshly created window has a content view");
 	let hint = centred_hint(mtm, content.bounds());
+	let keys = cornered_keys(mtm, content.bounds());
 	content.addSubview(&hint);
-	apply(&window, &hint, &style);
+	content.addSubview(&keys);
 
-	watch(window.clone(), hint.clone(), watched);
+	let screen = Rc::new(Screen { window, hint, keys, strokes: Keystrokes::new() });
+	screen.apply(&style);
+	screen.watch(watched);
+	screen.listen();
+
+	let window = screen.window.clone();
 
 	window.makeKeyAndOrderFront(None);
 	app.activate();
 	app.run();
 }
 
-/// Re-reads the style file on the main run loop rather than from a thread. AppKit may only
-/// be touched from the main thread, and a timer scheduled here already is one -- which is
-/// simpler, and one fewer place where a mistake shows up as a crash somewhere else.
-fn watch(window: Retained<NSWindow>, hint: Retained<NSTextField>, watched: Watched) {
-	// The block owns both for as long as the timer lives, and the timer lives as long as the
-	// run loop does. Nothing here is ever released, which is correct for a window that exists
-	// for the life of the process and would be a leak in anything shorter.
-	// A block must be callable from a shared reference, and re-reading the file needs a
-	// unique one. The cell is safe here for the same reason the timer is: only ever the main
-	// thread, only ever one call at a time.
-	let watched = RefCell::new(watched);
-	let tick = RcBlock::new(move |_: NonNull<NSTimer>| {
-		let changed = watched.borrow_mut().changed();
-		if let Some(style) = changed {
-			apply(&window, &hint, &style);
-		}
-	});
-
-	// SAFETY: the block only touches AppKit objects, and a timer scheduled on the main run
-	// loop only ever fires on the main thread.
-	unsafe {
-		NSTimer::scheduledTimerWithTimeInterval_repeats_block(RELOAD_INTERVAL, true, &tick);
-	}
+/// The window and everything on it, kept together because everything that changes changes
+/// more than one of them at once.
+struct Screen {
+	window: Retained<NSWindow>,
+	hint: Retained<NSTextField>,
+	keys: Retained<NSTextField>,
+	strokes: Keystrokes,
 }
 
-fn apply(window: &NSWindow, hint: &NSTextField, style: &Style) {
-	window.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(style.background, 1.0)));
-	hint.setStringValue(&NSString::from_str(&style.hint));
-	hint.setFont(Some(&NSFont::systemFontOfSize(style.hint_size)));
-	hint.setTextColor(Some(&NSColor::colorWithWhite_alpha(style.hint_white, 1.0)));
+impl Screen {
+	fn apply(&self, style: &Style) {
+		self.window.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(style.background, 1.0)));
+		self.hint.setStringValue(&NSString::from_str(&style.hint));
+		self.hint.setFont(Some(&NSFont::systemFontOfSize(style.hint_size)));
+		self.hint.setTextColor(Some(&NSColor::colorWithWhite_alpha(style.hint_white, 1.0)));
+		self.keys.setFont(Some(&NSFont::systemFontOfSize(style.keys_size)));
+		self.keys.setTextColor(Some(&NSColor::colorWithWhite_alpha(style.keys_white, 1.0)));
+	}
+
+	fn draw_keys(&self) {
+		self.keys.setStringValue(&NSString::from_str(&self.strokes.line()));
+	}
+
+	/// Re-reads the style file on the main run loop rather than from a thread, and expires the
+	/// keystroke display on the same tick. AppKit may only be touched from the main thread, and
+	/// a timer scheduled here already is one -- which is simpler, and one fewer place where a
+	/// mistake shows up as a crash somewhere else.
+	fn watch(self: &Rc<Self>, watched: Watched) {
+		// A block must be callable from a shared reference, and re-reading the file needs a
+		// unique one. The cell is safe here for the same reason the timer is: only ever the main
+		// thread, only ever one call at a time.
+		let watched = RefCell::new(watched);
+		let screen = Rc::clone(self);
+		let linger = RefCell::new(Duration::from_secs_f64(Style::default().keys_linger));
+
+		let tick = RcBlock::new(move |_: NonNull<NSTimer>| {
+			if let Some(style) = watched.borrow_mut().changed() {
+				*linger.borrow_mut() = Duration::from_secs_f64(style.keys_linger);
+				screen.apply(&style);
+			}
+			if screen.strokes.expire(*linger.borrow()) {
+				screen.draw_keys();
+			}
+		});
+
+		// SAFETY: the block only touches AppKit objects, and a timer scheduled on the main run
+		// loop only ever fires on the main thread.
+		unsafe {
+			NSTimer::scheduledTimerWithTimeInterval_repeats_block(RELOAD_INTERVAL, true, &tick);
+		}
+	}
+
+	/// Watches the keys this window receives and shows the ones the tap would have taken. The
+	/// event is handed straight back, which is the difference between this and the tap: the
+	/// same list, read for display instead of for suppression.
+	fn listen(self: &Rc<Self>) {
+		let screen = Rc::clone(self);
+		let seen = RcBlock::new(move |event: NonNull<NSEvent>| {
+			// SAFETY: AppKit hands the monitor a live event for the duration of the call.
+			let event = unsafe { event.as_ref() };
+			if screen.strokes.observe(event) {
+				screen.draw_keys();
+			}
+			(event as *const NSEvent).cast_mut()
+		});
+
+		// SAFETY: a local monitor only fires on the main thread, for this application's events.
+		// The monitor is never removed, which is correct for one that lives as long as the
+		// window does.
+		unsafe {
+			let monitor =
+				NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask(target::mask()), &seen);
+			std::mem::forget(monitor);
+		}
+	}
 }
 
 fn open(mtm: MainThreadMarker, mode: Mode) -> Retained<NSWindow> {
@@ -143,4 +206,19 @@ fn centred_hint(mtm: MainThreadMarker, bounds: NSRect) -> Retained<NSTextField> 
 			| NSAutoresizingMaskOptions::ViewMaxYMargin,
 	);
 	hint
+}
+
+/// The keystroke display, pinned to the bottom right -- a flexible left margin and a flexible
+/// top margin are what hold it there while everything around it resizes.
+fn cornered_keys(mtm: MainThreadMarker, bounds: NSRect) -> Retained<NSTextField> {
+	let keys = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+	keys.setAlignment(NSTextAlignment::Right);
+	keys.setFrame(NSRect::new(
+		NSPoint::new(KEYS_INSET, KEYS_INSET),
+		NSSize::new(bounds.size.width - KEYS_INSET * 2.0, KEYS_HEIGHT),
+	));
+	keys.setAutoresizingMask(
+		NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin,
+	);
+	keys
 }

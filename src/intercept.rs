@@ -11,23 +11,13 @@
 
 use crate::deadline::Deadline;
 use crate::escape::Gesture;
+use crate::target::{self, KEY_DOWN, KEY_UP};
 use core_foundation::base::TCFType;
 use core_foundation::mach_port::{CFMachPort, CFMachPortRef};
 use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
-
-/// Event types, as Core Graphics numbers them.
-pub const KEY_DOWN: u32 = 10;
-pub const KEY_UP: u32 = 11;
-const FLAGS_CHANGED: u32 = 12;
-
-/// Brightness, volume, the media keys and the keyboard backlight. They travel as system
-/// events rather than key events, which is why a tap that asks only for key events lets
-/// every one of them straight through. Brightness is the one that matters: a cloth that
-/// wakes the screen while the user is looking for dust on it defeats the whole application.
-const SYSTEM_DEFINED: u32 = 14;
 
 /// Reported to the callback rather than returned anywhere, so a tap the system has switched
 /// off looks exactly like a quiet keyboard unless these are handled.
@@ -118,11 +108,15 @@ pub fn run(deadline: Deadline) -> Result<(), ()> {
 	// installed, which is until the process ends.
 	let state = Box::into_raw(Box::new(Tapped { deadline, gesture: Gesture::watching() }));
 
-	let mask =
-		(1u64 << KEY_DOWN) | (1u64 << KEY_UP) | (1u64 << FLAGS_CHANGED) | (1u64 << SYSTEM_DEFINED);
-
 	let port = unsafe {
-		CGEventTapCreate(HID_LOCATION, HEAD_INSERT, ACTIVE_FILTER, mask, on_event, state.cast())
+		CGEventTapCreate(
+			HID_LOCATION,
+			HEAD_INSERT,
+			ACTIVE_FILTER,
+			target::mask(),
+			on_event,
+			state.cast(),
+		)
 	};
 	if port.is_null() {
 		return Err(());

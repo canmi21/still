@@ -22,6 +22,11 @@ pub struct Style {
 	pub hint: String,
 	pub hint_white: f64,
 	pub hint_size: f64,
+	/// The keystroke display in the corner, which exists only in window mode. It is read
+	/// while looking at it too, so it is set the same way.
+	pub keys_white: f64,
+	pub keys_size: f64,
+	pub keys_linger: f64,
 }
 
 impl Default for Style {
@@ -31,6 +36,9 @@ impl Default for Style {
 			hint: String::from("hold escape for three seconds to stop"),
 			hint_white: 0.30,
 			hint_size: 15.0,
+			keys_white: 0.45,
+			keys_size: 13.0,
+			keys_linger: 2.0,
 		}
 	}
 }
@@ -57,6 +65,9 @@ impl Style {
 				"background" => style.background = number_at(number, value)?,
 				"hint-white" => style.hint_white = number_at(number, value)?,
 				"hint-size" => style.hint_size = number_at(number, value)?,
+				"keys-white" => style.keys_white = number_at(number, value)?,
+				"keys-size" => style.keys_size = number_at(number, value)?,
+				"keys-linger" => style.keys_linger = number_at(number, value)?,
 				unknown => return Err(format!("line {}: unknown key `{unknown}`", number + 1)),
 			}
 		}

@@ -11,7 +11,7 @@
 //! key-downs a few milliseconds apart, so without telling a repeat from a real strike the
 //! burst would always fire first and the hold could never be reached.
 
-use crate::intercept::{KEY_DOWN, KEY_UP};
+use crate::target::{KEY_DOWN, KEY_UP};
 use std::collections::VecDeque;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
