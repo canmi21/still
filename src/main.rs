@@ -15,6 +15,9 @@ mod style;
 mod target;
 
 use deadline::Deadline;
+use escape::Gesture;
+use intercept::Handling;
+use objc2_core_graphics::CGEventType;
 use screen::Mode;
 use std::path::Path;
 use std::time::Duration;
@@ -36,7 +39,12 @@ fn main() {
 	let args: Vec<String> = std::env::args().skip(1).collect();
 	match args.split_first() {
 		Some((command, rest)) if command == "tap" => tap(rest),
-		Some((command, [])) if command == "screen" => screen::run(Mode::Windowed, Path::new(STYLE)),
+		Some((command, [])) if command == "screen" => {
+			// Window mode swallows nothing, but showing what would have been swallowed goes
+			// through the same tap, and a tap is a tap as far as the system is concerned.
+			require_permission();
+			screen::run(Mode::Windowed, Path::new(STYLE));
+		}
 		_ => {
 			eprintln!("{USAGE}");
 			std::process::exit(2);
@@ -64,11 +72,32 @@ fn tap(args: &[String]) {
 	);
 
 	let deadline = Deadline::start(idle, hard);
-	if intercept::run(deadline).is_err() {
+	let gesture = Gesture::watching();
+	let seen = Box::new(move |event: &intercept::Event| {
+		deadline.touch();
+		if matches!(event.kind, CGEventType::KeyDown | CGEventType::KeyUp) {
+			gesture.observe(event.kind.0, event.keycode(), event.is_repeat());
+		}
+	});
+
+	if intercept::install(Handling::Swallow, seen).is_err() {
 		eprintln!("still: could not install the event tap");
 		std::process::exit(1);
 	}
+	intercept::run();
 	eprintln!("still: released after swallowing {} events", intercept::swallowed());
+}
+
+fn require_permission() {
+	if permission::granted(true) {
+		return;
+	}
+	eprintln!(
+		"still: not trusted for Accessibility.\n\
+		 Grant it in System Settings > Privacy & Security > Accessibility, to whichever\n\
+		 application is running this binary, then start it again."
+	);
+	std::process::exit(1);
 }
 
 /// `--idle <seconds>` and `--hard <seconds>`, and nothing else. A background daemon that

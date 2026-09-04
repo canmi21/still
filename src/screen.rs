@@ -9,15 +9,15 @@
 //! Which is why the mode exists. The two differ in how the window is configured and not at
 //! all in what it contains, so what is settled here in a window carries over unchanged.
 
+use crate::intercept::{self, Event, Handling};
 use crate::keys::Keystrokes;
 use crate::style::{Style, Watched};
-use crate::target;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
 	NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
-	NSColor, NSEvent, NSEventMask, NSFont, NSTextAlignment, NSTextField, NSWindow, NSWindowStyleMask,
+	NSColor, NSFont, NSTextAlignment, NSTextField, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
@@ -136,27 +136,21 @@ impl Screen {
 		}
 	}
 
-	/// Watches the keys this window receives and shows the ones the tap would have taken. The
-	/// event is handed straight back, which is the difference between this and the tap: the
-	/// same list, read for display instead of for suppression.
+	/// Shows the keys the tap would have taken, through the very same tap. A monitor inside
+	/// the window would be simpler and would also be a lie: the system consumes brightness and
+	/// volume before any application sees them, so a window can only ever watch the keys it was
+	/// given. The tap sits below that and is told everything -- and here it is told to hand
+	/// every event straight back.
 	fn listen(self: &Rc<Self>) {
 		let screen = Rc::clone(self);
-		let seen = RcBlock::new(move |event: NonNull<NSEvent>| {
-			// SAFETY: AppKit hands the monitor a live event for the duration of the call.
-			let event = unsafe { event.as_ref() };
+		let seen = Box::new(move |event: &Event| {
 			if screen.strokes.observe(event) {
 				screen.draw_keys();
 			}
-			(event as *const NSEvent).cast_mut()
 		});
 
-		// SAFETY: a local monitor only fires on the main thread, for this application's events.
-		// The monitor is never removed, which is correct for one that lives as long as the
-		// window does.
-		unsafe {
-			let monitor =
-				NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask(target::mask()), &seen);
-			std::mem::forget(monitor);
+		if intercept::install(Handling::Observe, seen).is_err() {
+			eprintln!("still: could not install the event tap; keys will not be shown");
 		}
 	}
 }

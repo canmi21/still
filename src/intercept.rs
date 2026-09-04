@@ -1,136 +1,134 @@
-//! The keyboard tap itself.
+//! The keyboard tap.
 //!
-//! The tap sits at the HID location, ahead of every other consumer, and is an active filter
-//! rather than a passive listener -- the two together are what let it drop an event instead
-//! of merely watching it go past.
+//! It sits at the HID location, ahead of every other consumer, and is an active filter
+//! rather than a passive listener. That position is the whole reason it exists: brightness,
+//! volume and the media keys never reach an application's event queue at all -- the system
+//! consumes them on the way -- so nothing watching from inside a window can see them, and a
+//! tap below the routing sees everything.
 //!
-//! Core Graphics is called directly here rather than through a wrapper crate. The reason is
-//! the event mask: brightness, volume and the other media keys are not key events at all,
-//! and the mask bit they need has no name in any Rust binding's event enum. Reaching them
-//! means building the mask as the number it actually is.
+//! Filtering and dropping are not the same choice. The tap is an active filter in both
+//! modes; what differs is whether the callback hands the event back. `Swallow` returns
+//! nothing and the event is gone. `Observe` returns it untouched, which is how window mode
+//! shows exactly what would have been taken while taking none of it.
 
-use crate::deadline::Deadline;
-use crate::escape::Gesture;
-use crate::target::{self, KEY_DOWN, KEY_UP};
-use core_foundation::base::TCFType;
-use core_foundation::mach_port::{CFMachPort, CFMachPortRef};
-use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
+use crate::target;
+use objc2_core_foundation::{CFMachPort, CFRetained, CFRunLoop, kCFRunLoopCommonModes};
+use objc2_core_graphics::{
+	CGEvent, CGEventField, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+	CGEventTapProxy, CGEventType,
+};
 use std::ffi::c_void;
-use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::ptr::{self, NonNull};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Reported to the callback rather than returned anywhere, so a tap the system has switched
-/// off looks exactly like a quiet keyboard unless these are handled.
-const TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
-const TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
-
-/// The fields holding a key event's virtual keycode, and whether the system generated it
-/// from a key that is still down rather than from the user pressing one.
-const KEYCODE_FIELD: u32 = 9;
-const AUTOREPEAT_FIELD: u32 = 8;
-
-/// Ahead of every other consumer, at the lowest point a process is allowed to sit, filtering
-/// rather than watching.
-const HID_LOCATION: u32 = 0;
-const HEAD_INSERT: u32 = 0;
-const ACTIVE_FILTER: u32 = 0;
-
-#[repr(C)]
-struct CGEventOpaque {
-	_private: [u8; 0],
-}
-type CGEventRef = *mut CGEventOpaque;
-type CGEventTapProxy = *mut c_void;
-type CGEventTapCallBack =
-	unsafe extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef;
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-	fn CGEventTapCreate(
-		tap: u32,
-		place: u32,
-		options: u32,
-		events_of_interest: u64,
-		callback: CGEventTapCallBack,
-		user_info: *mut c_void,
-	) -> CFMachPortRef;
-	fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
-	fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
-}
-
-/// The tap's own port, so the callback can switch it back on after the system has switched
-/// it off. It is a static because the callback exists before the tap does.
-static PORT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+/// The fields holding a key event's virtual keycode, and whether the system generated it from
+/// a key that is still down rather than from the user pressing one.
+const KEYCODE_FIELD: CGEventField = CGEventField(9);
+const AUTOREPEAT_FIELD: CGEventField = CGEventField(8);
 
 /// Counts what was dropped, so a run can report what it actually managed to swallow.
 static SWALLOWED: AtomicU64 = AtomicU64::new(0);
 
-/// What the callback needs, reached through the tap's user pointer.
+/// What the tap does with what it takes.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Handling {
+	/// Drop the event. Nothing downstream ever sees it.
+	Swallow,
+	/// Hand it back untouched, having looked at it.
+	Observe,
+}
+
+/// One event, for as long as the callback is running and no longer.
+pub struct Event<'tap> {
+	pub kind: CGEventType,
+	pub raw: &'tap CGEvent,
+}
+
+impl Event<'_> {
+	pub fn keycode(&self) -> u16 {
+		CGEvent::integer_value_field(Some(self.raw), KEYCODE_FIELD) as u16
+	}
+
+	pub fn is_repeat(&self) -> bool {
+		CGEvent::integer_value_field(Some(self.raw), AUTOREPEAT_FIELD) != 0
+	}
+}
+
+/// What the caller does with each event the tap takes.
+type Seen = Box<dyn Fn(&Event)>;
+
 struct Tapped {
-	deadline: Deadline,
-	gesture: Gesture,
+	handling: Handling,
+	seen: Seen,
+	port: Option<CFRetained<CFMachPort>>,
 }
 
-unsafe extern "C" fn on_event(
+unsafe extern "C-unwind" fn on_event(
 	_proxy: CGEventTapProxy,
-	kind: u32,
-	event: CGEventRef,
+	kind: CGEventType,
+	event: NonNull<CGEvent>,
 	user_info: *mut c_void,
-) -> CGEventRef {
-	// SAFETY: the pointer was leaked from `run` and is never freed, and this callback only
-	// runs on the run loop `run` is blocked on, so it cannot outlive the allocation.
-	let state = unsafe { &*(user_info as *const Tapped) };
+) -> *mut CGEvent {
+	// SAFETY: the pointer was leaked by `install` and is never freed, and this callback only
+	// runs on the run loop that outlives it.
+	let tapped = unsafe { &*(user_info as *const Tapped) };
+	let raw = unsafe { event.as_ref() };
 
-	if kind == TAP_DISABLED_BY_TIMEOUT || kind == TAP_DISABLED_BY_USER_INPUT {
-		let port = PORT.load(Ordering::Relaxed);
-		if !port.is_null() {
+	// The system switches a tap off if its callback is too slow, or on certain user input, and
+	// says so through the callback rather than through a return value. Left alone the process
+	// would sit there having quietly stopped intercepting anything.
+	if matches!(kind, CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput) {
+		if let Some(port) = &tapped.port {
 			eprintln!("still: the system disabled the tap, re-enabling");
-			unsafe { CGEventTapEnable(port.cast(), true) };
+			CGEvent::tap_enable(port, true);
 		}
-		return event;
+		return event.as_ptr();
 	}
 
-	state.deadline.touch();
-	SWALLOWED.fetch_add(1, Ordering::Relaxed);
+	(tapped.seen)(&Event { kind, raw });
 
-	if kind == KEY_DOWN || kind == KEY_UP {
-		let key = unsafe { CGEventGetIntegerValueField(event, KEYCODE_FIELD) } as u16;
-		let repeat = unsafe { CGEventGetIntegerValueField(event, AUTOREPEAT_FIELD) } != 0;
-		state.gesture.observe(kind, key, repeat);
+	match tapped.handling {
+		Handling::Swallow => {
+			SWALLOWED.fetch_add(1, Ordering::Relaxed);
+			ptr::null_mut()
+		}
+		Handling::Observe => event.as_ptr(),
 	}
-
-	ptr::null_mut()
 }
 
-/// Installs the tap and runs until something ends the process. Only returns on failure.
-pub fn run(deadline: Deadline) -> Result<(), ()> {
+/// Installs the tap on the current thread's run loop. It does not run the loop: window mode
+/// hands that to AppKit, and only the bare tap runs one of its own.
+pub fn install(handling: Handling, seen: Seen) -> Result<(), ()> {
 	// Deliberately leaked: the callback holds a raw pointer to it for as long as the tap is
 	// installed, which is until the process ends.
-	let state = Box::into_raw(Box::new(Tapped { deadline, gesture: Gesture::watching() }));
+	let tapped = Box::into_raw(Box::new(Tapped { handling, seen, port: None }));
 
+	// SAFETY: the callback is the one below and the pointer is the state it expects.
 	let port = unsafe {
-		CGEventTapCreate(
-			HID_LOCATION,
-			HEAD_INSERT,
-			ACTIVE_FILTER,
+		CGEvent::tap_create(
+			CGEventTapLocation::HIDEventTap,
+			CGEventTapPlacement::HeadInsertEventTap,
+			CGEventTapOptions::Default,
 			target::mask(),
-			on_event,
-			state.cast(),
+			Some(on_event),
+			tapped.cast(),
 		)
-	};
-	if port.is_null() {
-		return Err(());
 	}
+	.ok_or(())?;
 
-	// SAFETY: CGEventTapCreate follows the create rule, so this takes over the one reference
-	// it returned.
-	let port = unsafe { CFMachPort::wrap_under_create_rule(port) };
-	let source = port.create_runloop_source(0).map_err(|_| ())?;
-	PORT.store(port.as_concrete_TypeRef().cast(), Ordering::Relaxed);
-	CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
-	unsafe { CGEventTapEnable(port.as_concrete_TypeRef(), true) };
-	CFRunLoop::run_current();
+	let source = CFMachPort::new_run_loop_source(None, Some(&port), 0).ok_or(())?;
+	CFRunLoop::current().ok_or(())?.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
+	CGEvent::tap_enable(&port, true);
+
+	// Handed over only now, because the callback needs the port to switch it back on and the
+	// port does not exist until the tap does.
+	unsafe { (*tapped).port = Some(port) };
 	Ok(())
+}
+
+/// Runs the tap's own run loop. Only the bare tap uses this; window mode runs AppKit's.
+pub fn run() {
+	CFRunLoop::run();
 }
 
 /// How many events this run has dropped so far.
