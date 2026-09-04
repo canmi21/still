@@ -1,42 +1,80 @@
 //! The gesture that ends a run on purpose.
 //!
-//! Unlike the deadline this one runs inside the interception path, so it only works while
-//! everything else does. It exists for the ordinary case -- the user is finished and wants
-//! the screen back now -- and not as a safety net.
+//! A long press rather than a rapid sequence, and the reason is this application's whole
+//! subject: wiping a keyboard is a burst of short strikes landing on every key at once. A
+//! three-strike combination is precisely what a cloth produces by accident. Three seconds
+//! of one key held down is precisely what it cannot.
+//!
+//! The clock is read from a thread rather than from the tap callback, because the callback
+//! only runs when an event arrives and holding a key still produces none once auto-repeat
+//! is turned off. Polling makes the gesture independent of a setting the user may have
+//! changed for unrelated reasons.
 
-use core_graphics::event::CGKeyCode;
-use std::collections::VecDeque;
+use core_graphics::event::{CGEventType, CGKeyCode};
+use std::process;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
-/// Placeholder policy: three strikes of one key inside a window. The key, the count and the
-/// window are all provisional; see the note in `Gesture::observe`.
-const KEY: CGKeyCode = 0x35; // KeyCode::ESCAPE
-const STRIKES: usize = 3;
-const WINDOW: Duration = Duration::from_millis(1500);
+/// The key to hold, and for how long. Escape is far from the letters, so a hand resting on
+/// it is a decision rather than a slip.
+const KEY: CGKeyCode = 0x35;
+const HOLD: Duration = Duration::from_secs(3);
 
-#[derive(Default)]
+/// How often the hold is measured. Fine enough that the three seconds are not visibly four.
+const TICK: Duration = Duration::from_millis(100);
+
+/// The key is not currently down. A real timestamp can never collide with this.
+const NOT_HELD: u64 = u64::MAX;
+
 pub struct Gesture {
-	recent: VecDeque<Instant>,
+	started: Instant,
+	pressed_at: Arc<AtomicU64>,
 }
 
 impl Gesture {
-	/// Feeds one key-down to the gesture. Returns true when the run should end.
-	///
-	/// TODO(canmi): decide the real policy. What is here now is the obvious one and it is
-	/// very likely wrong for this application: wiping a keyboard means pressing every key
-	/// repeatedly, escape included, so a three-strike escape will fire within seconds of the
-	/// user starting to clean. A gesture that survives that has to be something a cloth
-	/// cannot produce -- a chord across two distant keys, a long hold, a key the cleaning
-	/// hand does not reach, or the same key struck slowly rather than quickly.
-	pub fn observe(&mut self, key: CGKeyCode) -> bool {
+	/// Starts watching. Like the deadline, the watcher ends the process itself rather than
+	/// reporting back: the tap dies with the process, so exiting is what releases the
+	/// keyboard, and routing that through the interception path would make the way out
+	/// depend on the thing it exists to escape from.
+	pub fn watching() -> Self {
+		let started = Instant::now();
+		let pressed_at = Arc::new(AtomicU64::new(NOT_HELD));
+		let watched = Arc::clone(&pressed_at);
+
+		thread::spawn(move || {
+			loop {
+				thread::sleep(TICK);
+				let since = watched.load(Ordering::Relaxed);
+				if since == NOT_HELD {
+					continue;
+				}
+				if started.elapsed().as_millis() as u64 - since >= HOLD.as_millis() as u64 {
+					eprintln!("still: escape held for {}s, releasing the keyboard", HOLD.as_secs());
+					process::exit(0);
+				}
+			}
+		});
+
+		Self { started, pressed_at }
+	}
+
+	/// Feeds one key event to the gesture.
+	pub fn observe(&self, kind: CGEventType, key: CGKeyCode) {
 		if key != KEY {
-			return false;
+			return;
 		}
-		let now = Instant::now();
-		self.recent.push_back(now);
-		while self.recent.front().is_some_and(|first| now.duration_since(*first) > WINDOW) {
-			self.recent.pop_front();
+		match kind {
+			// Auto-repeat keeps sending key-downs while the key is held. Only the first of them
+			// starts the clock, or the hold would never accumulate.
+			CGEventType::KeyDown => {
+				let now = self.started.elapsed().as_millis() as u64;
+				let _ =
+					self.pressed_at.compare_exchange(NOT_HELD, now, Ordering::Relaxed, Ordering::Relaxed);
+			}
+			CGEventType::KeyUp => self.pressed_at.store(NOT_HELD, Ordering::Relaxed),
+			_ => {}
 		}
-		self.recent.len() >= STRIKES
 	}
 }

@@ -15,7 +15,6 @@ use core_graphics::event::{
 };
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -32,7 +31,7 @@ static SWALLOWED: AtomicU64 = AtomicU64::new(0);
 
 /// Installs the tap and runs until something ends the process. Only returns on failure.
 pub fn run(deadline: Deadline) -> Result<(), ()> {
-	let gesture = Mutex::new(Gesture::default());
+	let gesture = Gesture::watching();
 
 	let tap = CGEventTap::new(
 		CGEventTapLocation::HID,
@@ -55,12 +54,9 @@ pub fn run(deadline: Deadline) -> Result<(), ()> {
 			deadline.touch();
 			SWALLOWED.fetch_add(1, Ordering::Relaxed);
 
-			if matches!(kind, CGEventType::KeyDown) {
+			if matches!(kind, CGEventType::KeyDown | CGEventType::KeyUp) {
 				let key = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
-				if gesture.lock().is_ok_and(|mut g| g.observe(key)) {
-					eprintln!("still: escape gesture, releasing the keyboard");
-					std::process::exit(0);
-				}
+				gesture.observe(kind, key);
 			}
 
 			CallbackResult::Drop
