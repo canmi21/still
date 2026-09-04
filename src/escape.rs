@@ -10,7 +10,7 @@
 //! is turned off. Polling makes the gesture independent of a setting the user may have
 //! changed for unrelated reasons.
 
-use core_graphics::event::{CGEventType, CGKeyCode};
+use crate::intercept::{KEY_DOWN, KEY_UP};
 use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// The key to hold, and for how long. Escape is far from the letters, so a hand resting on
 /// it is a decision rather than a slip.
-const KEY: CGKeyCode = 0x35;
+const KEY: u16 = 0x35;
 const HOLD: Duration = Duration::from_secs(3);
 
 /// How often the hold is measured. Fine enough that the three seconds are not visibly four.
@@ -61,19 +61,19 @@ impl Gesture {
 	}
 
 	/// Feeds one key event to the gesture.
-	pub fn observe(&self, kind: CGEventType, key: CGKeyCode) {
+	pub fn observe(&self, kind: u32, key: u16) {
 		if key != KEY {
 			return;
 		}
 		match kind {
 			// Auto-repeat keeps sending key-downs while the key is held. Only the first of them
 			// starts the clock, or the hold would never accumulate.
-			CGEventType::KeyDown => {
+			KEY_DOWN => {
 				let now = self.started.elapsed().as_millis() as u64;
 				let _ =
 					self.pressed_at.compare_exchange(NOT_HELD, now, Ordering::Relaxed, Ordering::Relaxed);
 			}
-			CGEventType::KeyUp => self.pressed_at.store(NOT_HELD, Ordering::Relaxed),
+			KEY_UP => self.pressed_at.store(NOT_HELD, Ordering::Relaxed),
 			_ => {}
 		}
 	}

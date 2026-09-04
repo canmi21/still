@@ -16,7 +16,6 @@ path = "src/main.rs"
 
 [dependencies]
 core-foundation = "0.10"
-core-graphics = "0.25"
 
 # Formatting is rustfmt's and the linter must not report it; see rustfmt.toml.
 [lints.clippy]
