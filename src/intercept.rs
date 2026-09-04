@@ -34,8 +34,10 @@ const SYSTEM_DEFINED: u32 = 14;
 const TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
 const TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
 
-/// The field holding a key event's virtual keycode.
+/// The fields holding a key event's virtual keycode, and whether the system generated it
+/// from a key that is still down rather than from the user pressing one.
 const KEYCODE_FIELD: u32 = 9;
+const AUTOREPEAT_FIELD: u32 = 8;
 
 /// Ahead of every other consumer, at the lowest point a process is allowed to sit, filtering
 /// rather than watching.
@@ -103,7 +105,8 @@ unsafe extern "C" fn on_event(
 
 	if kind == KEY_DOWN || kind == KEY_UP {
 		let key = unsafe { CGEventGetIntegerValueField(event, KEYCODE_FIELD) } as u16;
-		state.gesture.observe(kind, key);
+		let repeat = unsafe { CGEventGetIntegerValueField(event, AUTOREPEAT_FIELD) } != 0;
+		state.gesture.observe(kind, key, repeat);
 	}
 
 	ptr::null_mut()
