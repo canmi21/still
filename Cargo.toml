@@ -15,7 +15,8 @@ name = "still"
 path = "src/main.rs"
 
 [dependencies]
-gpui = "0.2"
+core-foundation = "0.10"
+core-graphics = "0.25"
 
 # Formatting is rustfmt's and the linter must not report it; see rustfmt.toml.
 [lints.clippy]
@@ -23,11 +24,19 @@ correctness = "deny"
 suspicious = "deny"
 complexity = "warn"
 
-# Own code at 0 so an edit-build cycle stays short, dependencies at 3 and then cached. That
-# split matters more here than in most projects: nearly all the work in a run happens inside
-# gpui and its graphics stack, and an unoptimised UI framework is a visibly slower one.
 [profile.dev]
 opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# A background daemon is optimised for what it costs at rest, not for how fast it builds.
+# `panic = "abort"` is a safety property rather than a size one: a panic inside the event tap
+# callback would otherwise unwind across an FFI boundary, and aborting instead kills the
+# process, which is what releases the keyboard.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
